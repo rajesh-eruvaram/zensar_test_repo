@@ -1,4 +1,4 @@
-name: JSM → Confluence Full Document Capture
+name: JSM → Confluence Link Update
 
 on:
   repository_dispatch:
@@ -17,16 +17,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Search All Confluence Pages and Update JSM
+      - name: Search Confluence and Update JSM
         env:
           ISSUE_KEY: ${{ github.event.client_payload.issueKey }}
           JIRA_URL: https://rajesheruvaram.atlassian.net
           CONFLUENCE_URL: https://rajesheruvaram.atlassian.net/wiki
           JIRA_USER: rajesh.eruvaram@gmail.com
           JIRA_TOKEN: ${{ secrets.JIRA_AUTH_TOKEN }}
-          FIELD_ID: customfield_10188   # ← Rich text Paragraph field
+          FIELD_ID: customfield_10188   # ← Update to your Paragraph (rich text) field ID
         run: |
-          echo "🔍 Deep searching Confluence for $ISSUE_KEY ..."
+          echo "🔍 Searching Confluence for $ISSUE_KEY"
           python3 <<'PY'
           import requests, os, json
 
@@ -37,37 +37,18 @@ jobs:
           issue_key = os.getenv("ISSUE_KEY")
           field_id = os.getenv("FIELD_ID")
 
-          def confluence_search_all(cql_query, limit=50):
-              """Fetch all pages matching the query (pagination handled)."""
-              start = 0
-              results = []
-              while True:
-                  resp = requests.get(
-                      f"{confluence_url}/rest/api/content/search",
-                      params={"cql": cql_query, "limit": limit, "start": start},
-                      auth=(jira_user, jira_token),
-                  )
-                  data = resp.json()
-                  batch = data.get("results", [])
-                  if not batch:
-                      break
-                  results.extend(batch)
-                  if len(batch) < limit:
-                      break
-                  start += limit
-              return results
+          # --- Step 1: Search Confluence ---
+          search_url = f"{confluence_url}/rest/api/content/search"
+          params = {"cql": f'type=page and text~"{issue_key}"'}
+          resp = requests.get(search_url, params=params, auth=(jira_user, jira_token))
+          data = resp.json()
 
-          # --- Step 1: Search across title + body for Jira key ---
-          cql = f'type=page and text~"{issue_key}"'
-          results = confluence_search_all(cql)
-
+          results = data.get("results", [])
           if not results:
-              print(f"❌ No Confluence content found for {issue_key}")
+              print(f"❌ No Confluence pages found for {issue_key}")
               exit(0)
 
-          print(f"✅ Found {len(results)} matching Confluence pages.")
-
-          # --- Step 2: Build ADF (Atlassian Document Format) content ---
+          # --- Step 2: Build ADF-compliant document ---
           content = []
           for r in results:
               title = r.get("title", "Untitled Page")
@@ -75,52 +56,34 @@ jobs:
               paragraph = {
                   "type": "paragraph",
                   "content": [
-                      {"type": "text", "text": "• "},  # bullet prefix
                       {
                           "type": "text",
                           "text": title,
-                          "marks": [{"type": "link", "attrs": {"href": href}}],
-                      },
+                          "marks": [
+                              {"type": "link", "attrs": {"href": href}}
+                          ],
+                      }
                   ],
               }
               content.append(paragraph)
 
-              # --- Step 2B: Optionally include attachments ---
-              attachments_url = f"{confluence_url}/rest/api/content/{r['id']}/child/attachment"
-              att_resp = requests.get(attachments_url, auth=(jira_user, jira_token))
-              att_data = att_resp.json()
-              for att in att_data.get("results", []):
-                  att_name = att.get("title", "Attachment")
-                  att_href = f"{confluence_url}{att['_links']['download']}"
-                  content.append({
-                      "type": "paragraph",
-                      "content": [
-                          {"type": "text", "text": "   ↳ "},
-                          {
-                              "type": "text",
-                              "text": att_name,
-                              "marks": [{"type": "link", "attrs": {"href": att_href}}],
-                          },
-                      ],
-                  })
+          adf_doc = {
+              "type": "doc",
+              "version": 1,
+              "content": content
+          }
 
-          adf_doc = {"type": "doc", "version": 1, "content": content}
+          print(f"✅ Found {len(results)} pages. Updating JSM with ADF document.")
 
-          # --- Step 3: Update JSM custom field ---
+          # --- Step 3: Update JSM field ---
           update_url = f"{jira_url}/rest/api/3/issue/{issue_key}"
           payload = {"fields": {field_id: adf_doc}}
           headers = {"Content-Type": "application/json"}
 
-          print(f"🪄 Updating JSM field {field_id} with {len(results)} entries...")
-          update = requests.put(
-              update_url,
-              auth=(jira_user, jira_token),
-              headers=headers,
-              data=json.dumps(payload),
-          )
-
+          update = requests.put(update_url, auth=(jira_user, jira_token),
+                                headers=headers, data=json.dumps(payload))
           if update.status_code == 204:
-              print("✅ Successfully updated JSM with full Confluence link list.")
+              print("✅ JSM updated successfully.")
           else:
               print(f"⚠️ Failed to update JSM. Status {update.status_code}")
               print(update.text)
