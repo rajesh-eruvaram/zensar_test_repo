@@ -25,7 +25,7 @@ jobs:
           CONFLUENCE_URL: https://rajesheruvaram.atlassian.net/wiki
           JIRA_USER: rajesh.eruvaram@gmail.com
           JIRA_TOKEN: ${{ secrets.JIRA_AUTH_TOKEN }}
-          FIELD_ID: customfield_10187   # ← Change to your actual field ID
+          FIELD_ID: customfield_10188   # ← Change to your actual field ID
         run: |
           echo "🔍 Searching Confluence for $ISSUE_KEY"
           python3 <<'PY'
