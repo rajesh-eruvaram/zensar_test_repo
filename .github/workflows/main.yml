@@ -1,4 +1,4 @@
-name: JSM → Confluence Link Update
+name: JSM → Confluence Full Document Capture
 
 on:
   repository_dispatch:
@@ -17,74 +17,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Search Confluence and Update JSM
+      - name: Install Python and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip
+          pip install requests
+
+      - name: Run Confluence → JSM Sync
         env:
           ISSUE_KEY: ${{ github.event.client_payload.issueKey }}
           JIRA_URL: https://rajesheruvaram.atlassian.net
           CONFLUENCE_URL: https://rajesheruvaram.atlassian.net/wiki
           JIRA_USER: rajesh.eruvaram@gmail.com
           JIRA_TOKEN: ${{ secrets.JIRA_AUTH_TOKEN }}
-          FIELD_ID: customfield_10188   # ← Update to your Paragraph (rich text) field ID
-        run: |
-          echo "🔍 Searching Confluence for $ISSUE_KEY"
-          python3 <<'PY'
-          import requests, os, json
-
-          jira_url = os.getenv("JIRA_URL")
-          confluence_url = os.getenv("CONFLUENCE_URL")
-          jira_user = os.getenv("JIRA_USER")
-          jira_token = os.getenv("JIRA_TOKEN")
-          issue_key = os.getenv("ISSUE_KEY")
-          field_id = os.getenv("FIELD_ID")
-
-          # --- Step 1: Search Confluence ---
-          search_url = f"{confluence_url}/rest/api/content/search"
-          params = {"cql": f'type=page and text~"{issue_key}"'}
-          resp = requests.get(search_url, params=params, auth=(jira_user, jira_token))
-          data = resp.json()
-
-          results = data.get("results", [])
-          if not results:
-              print(f"❌ No Confluence pages found for {issue_key}")
-              exit(0)
-
-          # --- Step 2: Build ADF-compliant document ---
-          content = []
-          for r in results:
-              title = r.get("title", "Untitled Page")
-              href = f"{confluence_url}{r['_links']['webui']}"
-              paragraph = {
-                  "type": "paragraph",
-                  "content": [
-                      {
-                          "type": "text",
-                          "text": title,
-                          "marks": [
-                              {"type": "link", "attrs": {"href": href}}
-                          ],
-                      }
-                  ],
-              }
-              content.append(paragraph)
-
-          adf_doc = {
-              "type": "doc",
-              "version": 1,
-              "content": content
-          }
-
-          print(f"✅ Found {len(results)} pages. Updating JSM with ADF document.")
-
-          # --- Step 3: Update JSM field ---
-          update_url = f"{jira_url}/rest/api/3/issue/{issue_key}"
-          payload = {"fields": {field_id: adf_doc}}
-          headers = {"Content-Type": "application/json"}
-
-          update = requests.put(update_url, auth=(jira_user, jira_token),
-                                headers=headers, data=json.dumps(payload))
-          if update.status_code == 204:
-              print("✅ JSM updated successfully.")
-          else:
-              print(f"⚠️ Failed to update JSM. Status {update.status_code}")
-              print(update.text)
-          PY
+          FIELD_ID: customfield_10188
+        run: python3 .github/scripts/confluence_search_update_jsm.py
