@@ -1,0 +1,69 @@
+name: JSM → Confluence Link Update
+
+on:
+  repository_dispatch:
+    types:
+      - jsm-confluence-search
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  jsm-confluence-link:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Search Confluence and Update JSM
+        env:
+          ISSUE_KEY: ${{ github.event.client_payload.issueKey }}
+          ISSUE_SUMMARY: ${{ github.event.client_payload.issueSummary }}
+          JIRA_URL: https://rajesheruvaram.atlassian.net
+          CONFLUENCE_URL: https://rajesheruvaram.atlassian.net/wiki
+          JIRA_USER: rajesh.eruvaram@gmail.com
+          JIRA_TOKEN: ${{ secrets.JIRA_AUTH_TOKEN }}
+          FIELD_ID: customfield_10416   # ← Change to your actual field ID
+        run: |
+          echo "🔍 Searching Confluence for $ISSUE_KEY"
+          python3 <<'PY'
+          import requests, os, json
+
+          jira_url = os.getenv("JIRA_URL")
+          confluence_url = os.getenv("CONFLUENCE_URL")
+          jira_user = os.getenv("JIRA_USER")
+          jira_token = os.getenv("JIRA_TOKEN")
+          issue_key = os.getenv("ISSUE_KEY")
+          field_id = os.getenv("FIELD_ID")
+
+          # --- Step 1: Search in Confluence ---
+          search_url = f"{confluence_url}/rest/api/content/search"
+          params = {"cql": f'type=page and text~"{issue_key}"'}
+          resp = requests.get(search_url, params=params, auth=(jira_user, jira_token))
+          data = resp.json()
+
+          results = data.get("results", [])
+          if not results:
+              print(f"❌ No Confluence pages found for {issue_key}")
+              exit(0)
+
+          # --- Step 2: Prepare links ---
+          page_links = [f"{confluence_url}{r['_links']['webui']}" for r in results]
+          link_text = "\n".join(page_links)
+          print(f"✅ Found {len(page_links)} pages:\n{link_text}")
+
+          # --- Step 3: Update JSM custom field ---
+          update_url = f"{jira_url}/rest/api/3/issue/{issue_key}"
+          payload = {"fields": {field_id: link_text}}
+          headers = {"Content-Type": "application/json"}
+
+          update = requests.put(update_url, auth=(jira_user, jira_token),
+                                headers=headers, data=json.dumps(payload))
+          if update.status_code == 204:
+              print("✅ JSM updated successfully.")
+          else:
+              print(f"⚠️ Failed to update JSM. Status {update.status_code}")
+              print(update.text)
+          PY
