@@ -1,0 +1,268 @@
+name: Post Deployment Status to JSM (Dev / UAT / Prod)
+
+on:
+  workflow_run:
+    workflows:
+      - "Deploymnet and Redeployment"
+    types:
+      - completed
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  post-deployment-status:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ✅ Step 1: Identify environment and result from branch
+      - name: Identify environment and result
+        id: identify
+        run: |
+          BRANCH="${{ github.event.workflow_run.head_branch }}"
+          echo "🔍 Triggered by branch: $BRANCH"
+
+          if [[ "$BRANCH" == "main" ]]; then
+            ENVIRONMENT="prod"
+          elif [[ "$BRANCH" == "uat" ]]; then
+            ENVIRONMENT="uat"
+          else
+            ENVIRONMENT="dev"
+          fi
+
+          if [ "${{ github.event.workflow_run.conclusion }}" == "success" ]; then
+            STATUS="Deployment Completed"
+          else
+            STATUS="Deployment Failed"
+          fi
+
+          echo "env=${ENVIRONMENT}" >> $GITHUB_OUTPUT
+          echo "status=${STATUS}" >> $GITHUB_OUTPUT
+
+      # ✅ Step 2: Download artifact metadata
+      - name: Download deployment artifact metadata
+        id: download
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const run_id = context.payload.workflow_run.id;
+            const artifacts = await github.rest.actions.listWorkflowRunArtifacts({ owner, repo, run_id });
+            if (!artifacts.data.artifacts.length) {
+              core.warning("⚠️ No artifacts found for this run");
+              return;
+            }
+            const artifact = artifacts.data.artifacts[0];
+            console.log(`📦 Found artifact: ${artifact.name}`);
+            core.setOutput("artifact_name", artifact.name);
+            core.setOutput("artifact_id", artifact.id);
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ✅ Step 3: Download artifact content
+      - name: Download artifact content
+        if: ${{ steps.download.outputs.artifact_id != '' }}
+        run: |
+          mkdir -p logs
+          gh run download ${{ github.event.workflow_run.id }} \
+            --name "${{ steps.download.outputs.artifact_name }}" \
+            --dir logs \
+            --repo "${{ github.repository }}"
+          echo "✅ Logs downloaded to logs/"
+        env:
+          GH_TOKEN: ${{ secrets.PR_GITHUB_TOKEN }}
+
+      # ✅ Step 4: Rename artifact dynamically for DEV / UAT / PROD with correct issue key
+      - name: Rename artifact with env, date, and issue ID (supports CR link)
+        id: rename
+        if: ${{ steps.download.outputs.artifact_name != '' }}
+        run: |
+          ENVIRONMENT="${{ steps.identify.outputs.env }}"
+          ART_NAME="${{ steps.download.outputs.artifact_name }}"
+          DATE_TAG=$(date '+%Y-%m-%d')
+          ISSUE_KEY=$(echo "$ART_NAME" | grep -oE '(DEV|CR)-[0-9]+' || echo "UNKNOWN")
+
+          # 🔍 Find linked issue (CR <-> DEV)
+          LINKED_KEY=$(curl -s -X GET \
+            --url "https://marvell-itism.atlassian.net/rest/api/3/issue/${ISSUE_KEY}?fields=issuelinks" \
+            --user "erajesh@marvell.com:${{ secrets.JSM_AUTH_TOKEN }}" \
+            --header 'Accept: application/json' \
+            | jq -r '.fields.issuelinks[]? | (.outwardIssue?.key // .inwardIssue?.key)' \
+            | grep -E '^(DEV|CR)-[0-9]+' | grep -v "$ISSUE_KEY" | head -n 1)
+
+          # Decide which key to use for renaming
+          if [ "$ENVIRONMENT" = "dev" ]; then
+            FINAL_KEY="$ISSUE_KEY"
+          else
+            FINAL_KEY="${LINKED_KEY:-$ISSUE_KEY}"
+          fi
+
+          BASE_FILE="XXTEST_INST.log"
+          LONG_NAME="${ENVIRONMENT}-${DATE_TAG}-${FINAL_KEY}-${BASE_FILE}"
+
+          echo "📁 Using issue key: $FINAL_KEY"
+          echo "Renaming artifact to: ${LONG_NAME}"
+          mv "logs/${ART_NAME}" "logs/${LONG_NAME}" 2>/dev/null || mv "logs/${BASE_FILE}" "logs/${LONG_NAME}" 2>/dev/null || true
+          echo "long_artifact_name=${LONG_NAME}" >> $GITHUB_OUTPUT
+
+      # ✅ Step 5: Extract Issue Key
+      - name: Extract Issue Key
+        id: extract
+        run: |
+          ART_NAME="${{ steps.rename.outputs.long_artifact_name }}"
+          ISSUE_KEY=$(echo "$ART_NAME" | grep -oE '(DEV|CR)-[0-9]+' || echo "UNKNOWN")
+          echo "issue=${ISSUE_KEY}" >> $GITHUB_OUTPUT
+          echo "Detected issue: $ISSUE_KEY"
+
+      # ✅ Step 6: Attach logs to both DEV & CR issues
+      - name: Attach logs to both issues
+        if: always()
+        run: |
+          ENVIRONMENT="${{ steps.identify.outputs.env }}"
+          ISSUE_KEY="${{ steps.extract.outputs.issue }}"
+          LOG_FILE=$(ls logs/* 2>/dev/null | head -n 1)
+          NEW_LOG_NAME="$(basename "$LOG_FILE")"
+
+          if [ -z "$ISSUE_KEY" ] || [ "$ISSUE_KEY" = "UNKNOWN" ]; then
+            echo "⚠️ No issue key detected."
+            exit 0
+          fi
+
+          echo "🔗 Uploading logs to $ISSUE_KEY"
+          curl -s -X POST \
+            --url "https://marvell-itism.atlassian.net/rest/api/3/issue/${ISSUE_KEY}/attachments" \
+            --user "erajesh@marvell.com:${{ secrets.JSM_AUTH_TOKEN }}" \
+            -H "X-Atlassian-Token: no-check" \
+            -F "file=@logs/${NEW_LOG_NAME}"
+
+          LINKED=$(curl -s -X GET \
+            --url "https://marvell-itism.atlassian.net/rest/api/3/issue/${ISSUE_KEY}?fields=issuelinks" \
+            --user "erajesh@marvell.com:${{ secrets.JSM_AUTH_TOKEN }}" \
+            --header 'Accept: application/json' \
+            | jq -r '.fields.issuelinks[]? | (.outwardIssue?.key // .inwardIssue?.key)' \
+            | grep -E '^(DEV|CR)-[0-9]+' | grep -v "$ISSUE_KEY" | head -n 1)
+
+          if [ -n "$LINKED" ]; then
+            echo "🔗 Also attaching to linked issue: $LINKED"
+            curl -s -X POST \
+              --url "https://marvell-itism.atlassian.net/rest/api/3/issue/${LINKED}/attachments" \
+              --user "erajesh@marvell.com:${{ secrets.JSM_AUTH_TOKEN }}" \
+              -H "X-Atlassian-Token: no-check" \
+              -F "file=@logs/${NEW_LOG_NAME}"
+          fi
+
+      # ✅ Step 7: Update Deployment Status fields
+      - name: Update Deployment Status fields
+        if: always()
+        run: |
+          ENVIRONMENT="${{ steps.identify.outputs.env }}"
+          ISSUE_KEY="${{ steps.extract.outputs.issue }}"
+          STATUS="${{ steps.identify.outputs.status }}"
+          AUTHOR="${{ github.actor }}"
+          END_TIME=$(date +"%Y-%m-%d %H:%M:%S %Z")
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}"
+
+          if [ "$ENVIRONMENT" = "dev" ]; then
+            FIELD_ID="customfield_10458"
+          elif [ "$ENVIRONMENT" = "uat" ]; then
+            FIELD_ID="customfield_10459"
+          else
+            FIELD_ID="customfield_10460"
+          fi
+
+          update_jsm_field() {
+            local ISSUE=$1
+            echo "📝 Updating $ISSUE -> ${ENVIRONMENT^^} Deployment Status"
+            curl -s -X PUT \
+              --url "https://marvell-itism.atlassian.net/rest/api/3/issue/${ISSUE}" \
+              --user "erajesh@marvell.com:${{ secrets.JSM_AUTH_TOKEN }}" \
+              --header 'Content-Type: application/json' \
+              --data "{
+                \"fields\": {
+                  \"${FIELD_ID}\": {
+                    \"type\": \"doc\",
+                    \"version\": 1,
+                    \"content\": [
+                      {
+                        \"type\": \"paragraph\",
+                        \"content\": [
+                          {\"type\": \"text\", \"text\": \"Deployment Status: ${STATUS}\"},
+                          {\"type\": \"hardBreak\"},
+                          {\"type\": \"text\", \"text\": \"Date & Time: ${END_TIME}\"},
+                          {\"type\": \"hardBreak\"},
+                          {\"type\": \"text\", \"text\": \"Author: ${AUTHOR}\"},
+                          {\"type\": \"hardBreak\"},
+                          {\"type\": \"text\", \"text\": \"View Logs: ${RUN_URL}\"}
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }"
+          }
+
+          update_jsm_field "$ISSUE_KEY"
+
+          LINKED=$(curl -s -X GET \
+            --url "https://marvell-itism.atlassian.net/rest/api/3/issue/${ISSUE_KEY}?fields=issuelinks" \
+            --user "erajesh@marvell.com:${{ secrets.JSM_AUTH_TOKEN }}" \
+            --header 'Accept: application/json' \
+            | jq -r '.fields.issuelinks[]? | (.outwardIssue?.key // .inwardIssue?.key)' \
+            | grep -E '^(DEV|CR)-[0-9]+' | grep -v "$ISSUE_KEY" | head -n 1)
+
+          if [ -n "$LINKED" ]; then
+            update_jsm_field "$LINKED"
+          fi
+
+      # ✅ Step 8: Add summary comment in both issues
+      - name: Add deployment comments
+        if: always()
+        run: |
+          ENVIRONMENT="${{ steps.identify.outputs.env }}"
+          ISSUE_KEY="${{ steps.extract.outputs.issue }}"
+          STATUS="${{ steps.identify.outputs.status }}"
+          AUTHOR="${{ github.actor }}"
+          END_TIME=$(date +"%Y-%m-%d %H:%M:%S %Z")
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}"
+          COMMENT_TEXT="✅ ${ENVIRONMENT^^} Deployment: ${STATUS}\n🕒 ${END_TIME}\n👤 ${AUTHOR}\n🔗 Logs: ${RUN_URL}"
+
+          post_comment() {
+            local ISSUE=$1
+            echo "💬 Commenting in $ISSUE"
+            curl -s -X POST \
+              --url "https://marvell-itism.atlassian.net/rest/api/3/issue/${ISSUE}/comment" \
+              --user "erajesh@marvell.com:${{ secrets.JSM_AUTH_TOKEN }}" \
+              --header 'Content-Type: application/json' \
+              --data "{
+                \"body\": {
+                  \"type\": \"doc\",
+                  \"version\": 1,
+                  \"content\": [
+                    {
+                      \"type\": \"paragraph\",
+                      \"content\": [
+                        {\"type\": \"text\", \"text\": \"${COMMENT_TEXT}\"}
+                      ]
+                    }
+                  ]
+                }
+              }"
+          }
+
+          post_comment "$ISSUE_KEY"
+
+          LINKED=$(curl -s -X GET \
+            --url "https://marvell-itism.atlassian.net/rest/api/3/issue/${ISSUE_KEY}?fields=issuelinks" \
+            --user "erajesh@marvell.com:${{ secrets.JSM_AUTH_TOKEN }}" \
+            --header 'Accept: application/json' \
+            | jq -r '.fields.issuelinks[]? | (.outwardIssue?.key // .inwardIssue?.key)' \
+            | grep -E '^(DEV|CR)-[0-9]+' | grep -v "$ISSUE_KEY" | head -n 1)
+
+          if [ -n "$LINKED" ]; then
+            post_comment "$LINKED"
+          fi
+
+    env:
+      JSM_AUTH_TOKEN: ${{ secrets.JSM_AUTH_TOKEN }}
