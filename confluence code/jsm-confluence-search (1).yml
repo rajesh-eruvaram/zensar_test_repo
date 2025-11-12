@@ -1,0 +1,36 @@
+name: JSM Confluence Page Collector
+
+on:
+  repository_dispatch:
+    types: [jsm-confluence-search]
+
+jobs:
+  search-confluence:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests atlassian-python-api
+
+      - name: Run Confluence Search Script
+        env:
+          JIRA_URL: ${{ secrets.JIRA_BASE_URL }} 
+          JIRA_USER: ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN: ${{ secrets.JSM_AUTH_TOKEN }}
+          CONFLUENCE_URL: ${{ secrets.CONFLUENCE_URL }}
+          CONFLUENCE_USER: ${{ secrets.CONFLUENCE_USER }}
+          CONFLUENCE_TOKEN: ${{ secrets.CONF_AUTH_TOKEN }}
+          ISSUE_KEY: ${{ github.event.client_payload.issueKey }}
+          PROJECT_KEY: ${{ github.event.client_payload.project }}
+          FIELD_ID: ${{ secrets.FIELD_ID }}
+        run: |
+          python .github/scripts/confluence_search_update_jsm.py
