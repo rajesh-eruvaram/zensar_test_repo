@@ -1,0 +1,34 @@
+name: JSM → Confluence Full Document Capture
+
+on:
+  repository_dispatch:
+    types:
+      - jsm-confluence-search
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  jsm-confluence-link:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Python and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip
+          pip install requests
+
+      - name: Run Confluence → JSM Sync
+        env:
+          ISSUE_KEY: ${{ github.event.client_payload.issueKey }}
+          JIRA_URL: https://marvell.atlassian.net
+          CONFLUENCE_URL: https://apidevcloud.marvell.com/ws/rest/ewiki
+          JIRA_USER: erajesh@marvell.com
+          JIRA_TOKEN: ${{ secrets.CONF_AUTH_TOKEN }}
+          FIELD_ID: customfield_10461
+        run: python3 .github/scripts/confluence_search_update_jsm.py
